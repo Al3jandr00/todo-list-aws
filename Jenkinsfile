@@ -80,26 +80,30 @@ EOF
 }
 
 
-    stage('Rest Test') {
+ stage('Rest Test') {
   steps {
     sh '''
       set -e
 
+      # 1) Obtener la URL del API desde CloudFormation
       BASE_URL=$(aws cloudformation describe-stacks \
-        --stack-name ${STACK_NAME} \
-        --region ${AWS_REGION} \
+        --stack-name todo-list-staging \
+        --region us-east-1 \
         --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
         --output text)
 
-      echo "BaseUrlApi = $BASE_URL"
+      echo "BASE_URL=$BASE_URL"
+      export BASE_URL
 
-      HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE_URL/todos")
-      echo "HTTP_CODE=$HTTP_CODE"
+      # 2) Instalar dependencias para tests de integración
+      python3 -m pip install --user -U pytest requests
 
-      test "$HTTP_CODE" = "200"
+      # 3) Ejecutar pruebas de integración (si falla una, falla la stage)
+      pytest -q test/integration/todoApiTest.py -m api
     '''
   }
 }
+
 
     stage('Promote') {
       steps {
