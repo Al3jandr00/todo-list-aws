@@ -28,33 +28,45 @@ pipeline {
       }
     }
 
-    stage('Static Test') {
-      steps {
-        sh '''
-          set -e
-          python3 -m pip install --user --upgrade pip >/dev/null
-          python3 -m pip install --user flake8 bandit >/dev/null
+stage('Static Test') {
+  steps {
+    sh '''
+      set -e
 
-          mkdir -p reports
+      python3 -m pip install --user --upgrade pip >/dev/null
+      python3 -m pip install --user flake8 bandit >/dev/null
 
-          # Flake8 (solo src) -> informe
-          python3 -m flake8 src --statistics --count --tee --output-file reports/flake8.txt || true
+      mkdir -p reports
 
-          # Bandit (solo src) -> informe
-          python3 -m bandit -r src -f txt -o reports/bandit.txt || true
+      # Flake8 (solo src) -> informe (no falla la stage por findings)
+      python3 -m flake8 src \
+        --statistics \
+        --count \
+        --tee \
+        --output-file reports/flake8.txt || true
 
-          echo "== Flake8 report (tail) =="
-          tail -n 50 reports/flake8.txt || true
-          echo "== Bandit report (tail) =="
-          tail -n 50 reports/bandit.txt || true
-        '''
-      }
-      post {
-        always {
-          archiveArtifacts artifacts: 'reports/*.txt', fingerprint: true
-        }
-      }
+      # Si no hay findings, flake8 puede dejar el fichero vacío -> ponemos texto
+      test -s reports/flake8.txt || echo "No flake8 issues" > reports/flake8.txt
+
+      # Bandit (solo src) -> informe (no falla la stage por findings)
+      python3 -m bandit -r src -f txt -o reports/bandit.txt || true
+
+      # Igual para bandit, por si quedase vacío por cualquier motivo
+      test -s reports/bandit.txt || echo "No bandit issues" > reports/bandit.txt
+
+      echo "== Flake8 report (tail) =="
+      tail -n 50 reports/flake8.txt || true
+
+      echo "== Bandit report (tail) =="
+      tail -n 50 reports/bandit.txt || true
+    '''
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: 'reports/*.txt', fingerprint: true
     }
+  }
+}
 
    stage('Deploy') {
   steps {
@@ -105,7 +117,7 @@ EOF
 }
 
 
-   stage('Promote') {
+stage('Promote') {
   steps {
     withCredentials([
       usernamePassword(
@@ -116,22 +128,18 @@ EOF
     ]) {
       sh '''
         set -e
-
         echo "=== Promote: merge develop -> master ==="
 
         git config user.email "jenkins@local"
         git config user.name "jenkins"
 
-        # Aseguramos ramas actualizadas
+        # Asegurar refs actualizadas
         git fetch origin
 
-        # Cambiar a master (crear si no existe)
-        git checkout master || git checkout -b master
+        # Ir a master y dejarla igual que el remoto (evita merges sobre master desactualizado)
+        git checkout -B master origin/master
 
-        # Actualizar master remoto
-        git pull https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master || true
-
-        # Merge desde develop
+        # Merge desde develop (remota)
         git merge --no-ff origin/develop -m "Promote: merge develop into master"
 
         # Push a master
@@ -142,6 +150,7 @@ EOF
     }
   }
 }
+
 
 
   }
