@@ -81,24 +81,25 @@ EOF
 
 
     stage('Rest Test') {
-      steps {
-        sh '''
-          set -e
+  steps {
+    sh '''
+      set -e
 
-          # Obtener BaseUrlApi desde CloudFormation Outputs
-          BASE_URL=$(aws cloudformation describe-stacks \
-            --stack-name ${STACK_NAME} \
-            --region ${AWS_REGION} \
-            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
-            --output text)
+      BASE_URL=$(aws cloudformation describe-stacks \
+        --stack-name ${STACK_NAME} \
+        --region ${AWS_REGION} \
+        --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+        --output text)
 
-          echo "BaseUrlApi = $BASE_URL"
+      echo "BaseUrlApi = $BASE_URL"
 
-          # Test sencillo tipo smoke (fallará si API no responde 200)
-          curl -sS -o /dev/null -w "%{http_code}" "$BASE_URL/todos" | grep -q "^200$"
-        '''
-      }
-    }
+      HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE_URL/todos")
+      echo "HTTP_CODE=$HTTP_CODE"
+
+      test "$HTTP_CODE" = "200"
+    '''
+  }
+}
 
     stage('Promote') {
       steps {
