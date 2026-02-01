@@ -118,7 +118,6 @@ EOF
 
 
 stage('Promote') {
-  when { branch 'develop' }
   steps {
     withCredentials([
       usernamePassword(
@@ -151,6 +150,7 @@ stage('Promote') {
     }
   }
 }
+
 
 
   }
