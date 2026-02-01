@@ -56,21 +56,29 @@ pipeline {
       }
     }
 
-    stage('Deploy') {
-      steps {
-        sh '''
-          set -e
-          sam build
-          sam validate
-          sam deploy \
-  --stack-name todo-list-staging \
-  --resolve-s3 \
-  --capabilities CAPABILITY_IAM \
-  --no-confirm-changeset \
-  --no-fail-on-empty-changeset
-        '''
-      }
-    }
+   stage('Deploy') {
+  steps {
+    sh '''
+      set -e
+      sam build
+      sam validate
+
+      # Crear config vacío para CI
+      cat > samconfig-ci.toml <<EOF
+version = 0.1
+EOF
+
+      sam deploy \
+        --stack-name todo-list-staging \
+        --resolve-s3 \
+        --capabilities CAPABILITY_IAM \
+        --no-confirm-changeset \
+        --no-fail-on-empty-changeset \
+        --config-file samconfig-ci.toml
+    '''
+  }
+}
+
 
     stage('Rest Test') {
       steps {
