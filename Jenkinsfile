@@ -62,9 +62,12 @@ pipeline {
           set -e
           sam build
           sam validate
-          sam deploy --config-env ${SAM_CONFIG_ENV} \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset
+          sam deploy \
+  --stack-name todo-list-staging \
+  --resolve-s3 \
+  --capabilities CAPABILITY_IAM \
+  --no-confirm-changeset \
+  --no-fail-on-empty-changeset
         '''
       }
     }
