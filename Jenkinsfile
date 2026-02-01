@@ -105,31 +105,44 @@ EOF
 }
 
 
-    stage('Promote') {
-  when {
-    branch 'develop'
-  }
+   stage('Promote') {
   steps {
-    withCredentials([usernamePassword(
-      credentialsId: 'github-pat',
-      usernameVariable: 'GIT_USER',
-      passwordVariable: 'GIT_TOKEN'
-    )]) {
+    withCredentials([
+      usernamePassword(
+        credentialsId: 'github-pat',
+        usernameVariable: 'GIT_USER',
+        passwordVariable: 'GIT_TOKEN'
+      )
+    ]) {
       sh '''
         set -e
-        git config user.email "jenkins@ci.local"
-        git config user.name "Jenkins CI"
 
-        git checkout master
-        git pull https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
+        echo "=== Promote: merge develop -> master ==="
 
-        git merge develop
+        git config user.email "jenkins@local"
+        git config user.name "jenkins"
 
+        # Aseguramos ramas actualizadas
+        git fetch origin
+
+        # Cambiar a master (crear si no existe)
+        git checkout master || git checkout -b master
+
+        # Actualizar master remoto
+        git pull https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master || true
+
+        # Merge desde develop
+        git merge --no-ff origin/develop -m "Promote: merge develop into master"
+
+        # Push a master
         git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
+
+        echo "=== Promote completed successfully ==="
       '''
     }
   }
 }
+
 
   }
 }
