@@ -106,16 +106,31 @@ EOF
 
 
     stage('Promote') {
-      steps {
-        input message: "¿Promover a master (merge develop -> master)?", ok: "Promote"
+  when {
+    branch 'develop'
+  }
+  steps {
+    withCredentials([usernamePassword(
+      credentialsId: 'github-pat',
+      usernameVariable: 'GIT_USER',
+      passwordVariable: 'GIT_TOKEN'
+    )]) {
+      sh '''
+        set -e
+        git config user.email "jenkins@ci.local"
+        git config user.name "Jenkins CI"
 
-        sh '''
-          set -e
-          echo "Promote stage: aquí harías el merge a master."
-          echo "Si quieres automatizarlo de verdad, añadimos credenciales GitHub en Jenkins."
-        '''
-      }
+        git checkout master
+        git pull https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
+
+        git merge develop
+
+        git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
+      '''
     }
+  }
+}
+
   }
 }
 
