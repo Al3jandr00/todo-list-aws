@@ -67,14 +67,16 @@ stage('Deploy') {
       # Elegir entorno por rama
       if [ "$BRANCH_NAME" = "develop" ]; then
         STACK_NAME="todo-list-staging"
+        STAGE_PARAM="staging"
       elif [ "$BRANCH_NAME" = "master" ]; then
         STACK_NAME="todo-list-production"
+        STAGE_PARAM="production"
       else
         echo "INFO: Rama $BRANCH_NAME sin despliegue (solo develop/master)."
         exit 0
       fi
 
-      echo "=== Deploy stack: $STACK_NAME ==="
+      echo "=== Deploy stack: $STACK_NAME (Stage=$STAGE_PARAM) ==="
 
       sam build
       sam validate
@@ -84,37 +86,18 @@ stage('Deploy') {
 version = 0.1
 EOF
 
-      # Limpieza preventiva: borra changesets antiguos "samcli-deploy*" del stack
-      # (evita: AlreadyExistsException / mismatch Description)
-      if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-        echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
-        CHANGESET_IDS=$(aws cloudformation list-change-sets \
-          --stack-name "$STACK_NAME" \
-          --region "$AWS_REGION" \
-          --query "Summaries[?starts_with(ChangeSetName, 'samcli-deploy')].ChangeSetId" \
-          --output text || true)
-
-        for CS_ID in $CHANGESET_IDS; do
-          echo " - Deleting changeset: $CS_ID"
-          aws cloudformation delete-change-set \
-            --stack-name "$STACK_NAME" \
-            --change-set-name "$CS_ID" \
-            --region "$AWS_REGION" || true
-        done
-      else
-        echo "Stack $STACK_NAME does not exist yet (first deploy). Skipping changeset cleanup."
-      fi
-
       sam deploy \
         --stack-name "$STACK_NAME" \
         --resolve-s3 \
         --capabilities CAPABILITY_IAM \
         --no-confirm-changeset \
         --no-fail-on-empty-changeset \
-        --config-file samconfig-ci.toml
+        --config-file samconfig-ci.toml \
+        --parameter-overrides Stage="$STAGE_PARAM"
     '''
   }
 }
+
 
 
 
