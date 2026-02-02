@@ -118,6 +118,9 @@ EOF
 
 
 stage('Promote') {
+  when {
+    expression { return env.BRANCH_NAME == 'develop' }
+  }
   steps {
     withCredentials([
       usernamePassword(
@@ -133,16 +136,17 @@ stage('Promote') {
         git config user.email "jenkins@local"
         git config user.name "jenkins"
 
-        # Asegurar refs actualizadas
-        git fetch origin
+        # 1) Traer refs necesarias (en multibranch a veces solo viene develop)
+        git fetch origin --prune
+        git fetch origin master:refs/remotes/origin/master
 
-        # Ir a master y dejarla igual que el remoto (evita merges sobre master desactualizado)
-        git checkout -B master origin/master
+        # 2) Preparar master local desde origin/master
+        git checkout -B master refs/remotes/origin/master
 
-        # Merge desde develop (remota)
+        # 3) Merge del develop que ya tenemos en origin/develop
         git merge --no-ff origin/develop -m "Promote: merge develop into master"
 
-        # Push a master
+        # 4) Push a master usando PAT
         git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
 
         echo "=== Promote completed successfully ==="
@@ -150,6 +154,7 @@ stage('Promote') {
     }
   }
 }
+
 
 
 
