@@ -118,6 +118,12 @@ EOF
 
 
 stage('Promote') {
+  when {
+    allOf {
+      branch 'develop'
+      not { buildingTag() }   // por si algún día etiquetas releases
+    }
+  }
   steps {
     withCredentials([
       usernamePassword(
@@ -134,15 +140,15 @@ stage('Promote') {
         git config user.name "jenkins"
 
         # Asegurar refs actualizadas
-        git fetch origin
+        git fetch origin --prune
 
-        # Ir a master y dejarla igual que el remoto (evita merges sobre master desactualizado)
+        # Asegurar master local igual que origin/master (evita merges sobre master desactualizado)
         git checkout -B master origin/master
 
         # Merge desde develop (remota)
         git merge --no-ff origin/develop -m "Promote: merge develop into master"
 
-        # Push a master
+        # Push a master usando PAT
         git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
 
         echo "=== Promote completed successfully ==="
@@ -150,6 +156,7 @@ stage('Promote') {
     }
   }
 }
+
 
 
 
