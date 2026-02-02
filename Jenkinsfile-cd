@@ -1,0 +1,77 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_DEFAULT_REGION = 'us-east-1'
+    AWS_REGION         = 'us-east-1'
+    SAM_CLI_TELEMETRY  = '0'
+    STACK_NAME         = 'todo-list-production'
+    SAM_CONFIG_ENV     = 'production'
+  }
+
+  options {
+    timestamps()
+    skipDefaultCheckout(true)
+  }
+
+  stages {
+
+    stage('Get Code') {
+      steps {
+        checkout scm
+        sh '''
+          set -e
+          echo "BRANCH_NAME=$BRANCH_NAME"
+          git log -1 --oneline
+        '''
+      }
+    }
+
+    stage('Deploy') {
+      steps {
+        sh '''
+          set -e
+          sam build
+          sam validate
+
+          # Config vacío para CI
+          cat > samconfig-ci.toml <<EOF
+version = 0.1
+EOF
+
+          sam deploy \
+            --stack-name ${STACK_NAME} \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --config-file samconfig-ci.toml
+        '''
+      }
+    }
+
+    stage('Rest Test') {
+      steps {
+        sh '''
+          set -e
+
+          # Base URL desde CloudFormation (producción)
+          BASE_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${STACK_NAME} \
+            --region ${AWS_REGION} \
+            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+            --output text)
+
+          echo "BASE_URL=$BASE_URL"
+          export BASE_URL
+
+          python3 -m pip install --user -U pytest requests >/dev/null
+
+          # SOLO LECTURA (sin alterar datos):
+          # - Filtramos tests "Get" (suelen ser los de solo lectura)
+          pytest -q test/integration/todoApiTest.py -m api -k "get or list"
+        '''
+      }
+    }
+  }
+}
