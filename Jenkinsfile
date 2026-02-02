@@ -59,41 +59,50 @@ pipeline {
       }
     }
 
-    stage('Deploy') {
-      steps {
-        sh '''
-          set -e
+  stage('Deploy') {
+  steps {
+    sh '''
+      set -e
 
-          # Elegir entorno por rama
-          if [ "$BRANCH_NAME" = "develop" ]; then
-            STACK_NAME="todo-list-staging"
-          elif [ "$BRANCH_NAME" = "master" ]; then
-            STACK_NAME="todo-list-production"
-          else
-            echo "INFO: Rama $BRANCH_NAME sin despliegue (solo develop/master)."
-            exit 0
-          fi
+      # Elegir entorno por rama
+      if [ "$BRANCH_NAME" = "develop" ]; then
+        STACK_NAME="todo-list-staging"
+      elif [ "$BRANCH_NAME" = "master" ]; then
+        STACK_NAME="todo-list-production"
+      else
+        echo "INFO: Rama $BRANCH_NAME sin despliegue (solo develop/master)."
+        exit 0
+      fi
 
-          echo "=== Deploy stack: $STACK_NAME ==="
+      echo "=== Deploy stack: $STACK_NAME ==="
 
-          sam build
-          sam validate
+      sam build
+      sam validate
 
-          # Config mínimo para CI (evitar modo guiado)
-          cat > samconfig-ci.toml <<EOF
+      # Config mínimo para CI (evitar modo guiado)
+      cat > samconfig-ci.toml <<EOF
 version = 0.1
 EOF
 
-          sam deploy \
-            --stack-name "$STACK_NAME" \
-            --resolve-s3 \
-            --capabilities CAPABILITY_IAM \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --config-file samconfig-ci.toml
-        '''
-      }
-    }
+      # Changeset único por build para evitar colisiones en CloudFormation
+      # (SAM a veces reutiliza nombres tipo samcli-deployXXXX y puede chocar)
+      CHANGESET_NAME="jenkins-${JOB_NAME}-${BUILD_NUMBER}"
+      CHANGESET_NAME=$(echo "$CHANGESET_NAME" | tr '/ _' '-' | cut -c1-60)
+
+      echo "Using changeset: $CHANGESET_NAME"
+
+      sam deploy \
+        --stack-name "$STACK_NAME" \
+        --resolve-s3 \
+        --capabilities CAPABILITY_IAM \
+        --no-confirm-changeset \
+        --no-fail-on-empty-changeset \
+        --changeset-name "$CHANGESET_NAME" \
+        --config-file samconfig-ci.toml
+    '''
+  }
+}
+
 
     // =========================
     // CI Rest Test (develop) - Pytest completo (5 pruebas)
