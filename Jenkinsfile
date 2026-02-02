@@ -59,7 +59,7 @@ pipeline {
       }
     }
 
-  stage('Deploy') {
+stage('Deploy') {
   steps {
     sh '''
       set -e
@@ -84,12 +84,26 @@ pipeline {
 version = 0.1
 EOF
 
-      # Changeset único por build para evitar colisiones en CloudFormation
-      # (SAM a veces reutiliza nombres tipo samcli-deployXXXX y puede chocar)
-      CHANGESET_NAME="jenkins-${JOB_NAME}-${BUILD_NUMBER}"
-      CHANGESET_NAME=$(echo "$CHANGESET_NAME" | tr '/ _' '-' | cut -c1-60)
+      # Limpieza preventiva: borra changesets antiguos "samcli-deploy*" del stack
+      # (evita: AlreadyExistsException / mismatch Description)
+      if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+        echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
+        CHANGESET_IDS=$(aws cloudformation list-change-sets \
+          --stack-name "$STACK_NAME" \
+          --region "$AWS_REGION" \
+          --query "Summaries[?starts_with(ChangeSetName, 'samcli-deploy')].ChangeSetId" \
+          --output text || true)
 
-      echo "Using changeset: $CHANGESET_NAME"
+        for CS_ID in $CHANGESET_IDS; do
+          echo " - Deleting changeset: $CS_ID"
+          aws cloudformation delete-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CS_ID" \
+            --region "$AWS_REGION" || true
+        done
+      else
+        echo "Stack $STACK_NAME does not exist yet (first deploy). Skipping changeset cleanup."
+      fi
 
       sam deploy \
         --stack-name "$STACK_NAME" \
@@ -97,11 +111,11 @@ EOF
         --capabilities CAPABILITY_IAM \
         --no-confirm-changeset \
         --no-fail-on-empty-changeset \
-        --changeset-name "$CHANGESET_NAME" \
         --config-file samconfig-ci.toml
     '''
   }
 }
+
 
 
     // =========================
