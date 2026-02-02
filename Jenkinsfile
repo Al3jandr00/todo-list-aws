@@ -59,41 +59,64 @@ pipeline {
       }
     }
 
-    stage('Deploy') {
-      steps {
-        sh '''
-          set -e
+stage('Deploy') {
+  steps {
+    sh '''
+      set -e
 
-          # Elegir entorno por rama
-          if [ "$BRANCH_NAME" = "develop" ]; then
-            STACK_NAME="todo-list-staging"
-          elif [ "$BRANCH_NAME" = "master" ]; then
-            STACK_NAME="todo-list-production"
-          else
-            echo "INFO: Rama $BRANCH_NAME sin despliegue (solo develop/master)."
-            exit 0
-          fi
+      # Elegir entorno por rama
+      if [ "$BRANCH_NAME" = "develop" ]; then
+        STACK_NAME="todo-list-staging"
+      elif [ "$BRANCH_NAME" = "master" ]; then
+        STACK_NAME="todo-list-production"
+      else
+        echo "INFO: Rama $BRANCH_NAME sin despliegue (solo develop/master)."
+        exit 0
+      fi
 
-          echo "=== Deploy stack: $STACK_NAME ==="
+      echo "=== Deploy stack: $STACK_NAME ==="
 
-          sam build
-          sam validate
+      sam build
+      sam validate
 
-          # Config mínimo para CI (evitar modo guiado)
-          cat > samconfig-ci.toml <<EOF
+      # Config mínimo para CI (evitar modo guiado)
+      cat > samconfig-ci.toml <<EOF
 version = 0.1
 EOF
 
-          sam deploy \
+      # Limpieza preventiva: borra changesets antiguos "samcli-deploy*" del stack
+      # (evita: AlreadyExistsException / mismatch Description)
+      if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+        echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
+        CHANGESET_IDS=$(aws cloudformation list-change-sets \
+          --stack-name "$STACK_NAME" \
+          --region "$AWS_REGION" \
+          --query "Summaries[?starts_with(ChangeSetName, 'samcli-deploy')].ChangeSetId" \
+          --output text || true)
+
+        for CS_ID in $CHANGESET_IDS; do
+          echo " - Deleting changeset: $CS_ID"
+          aws cloudformation delete-change-set \
             --stack-name "$STACK_NAME" \
-            --resolve-s3 \
-            --capabilities CAPABILITY_IAM \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --config-file samconfig-ci.toml
-        '''
-      }
-    }
+            --change-set-name "$CS_ID" \
+            --region "$AWS_REGION" || true
+        done
+      else
+        echo "Stack $STACK_NAME does not exist yet (first deploy). Skipping changeset cleanup."
+      fi
+
+      sam deploy \
+        --stack-name "$STACK_NAME" \
+        --resolve-s3 \
+        --capabilities CAPABILITY_IAM \
+        --no-confirm-changeset \
+        --no-fail-on-empty-changeset \
+        --config-file samconfig-ci.toml
+    '''
+  }
+}
+
+
 
     // =========================
     // CI Rest Test (develop) - Pytest completo (5 pruebas)
