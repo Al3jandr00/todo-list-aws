@@ -62,7 +62,7 @@ pipeline {
 stage('Deploy') {
   steps {
     sh '''
-      set -e
+      set -eu
 
       # Elegir entorno por rama
       if [ "$BRANCH_NAME" = "develop" ]; then
@@ -85,6 +85,37 @@ stage('Deploy') {
       cat > samconfig-ci.toml <<EOF
 version = 0.1
 EOF
+
+      # --- FIX: evitar AlreadyExistsException por changeset samcli-deploy repetido ---
+      echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
+      CHANGESETS=$(aws cloudformation list-change-sets \
+        --stack-name "$STACK_NAME" \
+        --region us-east-1 \
+        --query "Summaries[?starts_with(ChangeSetName, 'samcli-deploy')].[ChangeSetName,Status]" \
+        --output text 2>/dev/null || true)
+
+      if [ -n "$CHANGESETS" ]; then
+        echo "$CHANGESETS" | while read -r CS_NAME CS_STATUS; do
+          case "$CS_STATUS" in
+            CREATE_IN_PROGRESS|DELETE_IN_PROGRESS)
+              echo " - Skip (in progress): $CS_NAME ($CS_STATUS)"
+              ;;
+            *)
+              echo " - Deleting: $CS_NAME ($CS_STATUS)"
+              aws cloudformation delete-change-set \
+                --stack-name "$STACK_NAME" \
+                --change-set-name "$CS_NAME" \
+                --region us-east-1 || true
+              ;;
+          esac
+        done
+      else
+        echo " - No samcli-deploy changesets found."
+      fi
+
+      # pequeño delay por si hay builds muy seguidos
+      sleep 2
+      # ---------------------------------------------------------------------------
 
       sam deploy \
         --stack-name "$STACK_NAME" \
