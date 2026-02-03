@@ -138,7 +138,7 @@ EOF
       when { branch 'master' }
       steps {
         sh '''
-          set -euo pipefail
+          set -eu
 
           STACK_NAME="todo-list-production"
 
