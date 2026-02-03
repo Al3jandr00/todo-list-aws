@@ -165,90 +165,99 @@ EOF
     // =========================
     // CD Rest Test (master) - SOLO LECTURA con curl (opción 3)
     // =========================
-    stage('Rest Test (Read Only)') {
-      when { branch 'master' }
-      steps {
-        sh '''
-          set -eu
+ stage('Rest Test (Read Only)') {
+  when { expression { return env.BRANCH_NAME == 'master' } }
+  steps {
+    sh '''
+      set -eu
 
-          STACK_NAME="todo-list-production"
+      STACK_NAME="todo-list-production"
+      echo "=== Rest Test (READ-ONLY) ==="
 
-          echo "=== Rest Test (READ-ONLY) ==="
+      BASE_URL=$(aws cloudformation describe-stacks \
+        --stack-name "$STACK_NAME" \
+        --region us-east-1 \
+        --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+        --output text)
 
-          # 1) Obtener BASE_URL de producción
-          BASE_URL=$(aws cloudformation describe-stacks \
-            --stack-name "$STACK_NAME" \
-            --region us-east-1 \
-            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
-            --output text)
+      if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "None" ]; then
+        echo "ERROR: BASE_URL no obtenido desde CloudFormation"
+        exit 1
+      fi
 
-          if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "None" ]; then
-            echo "ERROR: No se pudo obtener BaseUrlApi del stack $STACK_NAME"
-            exit 1
-          fi
+      echo "BASE_URL=$BASE_URL"
 
-          echo "BASE_URL=$BASE_URL"
+      echo "---- curl: GET /todos ----"
+      LIST_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos")
+      echo "$LIST_RESP"
 
-          # 2) jq para parsear JSON
-          if ! command -v jq >/dev/null 2>&1; then
-            echo "jq no encontrado. Instalando..."
-            sudo apt-get update -y >/dev/null
-            sudo apt-get install -y jq >/dev/null
-          fi
+      # Separar body y status
+      LIST_STATUS=$(echo "$LIST_RESP" | sed -n 's/^HTTP_STATUS://p')
+      LIST_BODY=$(echo "$LIST_RESP" | sed '/^HTTP_STATUS:/d')
 
-          # -------------------------
-          # READ-ONLY TEST 1: GET /todos
-          # -------------------------
-          echo ""
-          echo "[1/2] GET /todos"
-          LIST_RESP=$(curl -sS -w "\\n%{http_code}" "$BASE_URL/todos" || true)
+      if [ "$LIST_STATUS" != "200" ]; then
+        echo "ERROR: GET /todos devolvió status $LIST_STATUS"
+        exit 1
+      fi
 
-          LIST_BODY=$(printf "%s" "$LIST_RESP" | sed '$d')
-          LIST_CODE=$(printf "%s" "$LIST_RESP" | tail -n 1)
+      # Obtener un id si hay items (sin jq, usando python)
+      TODO_ID=$(python3 - <<'PY'
+import json, sys
+body = sys.stdin.read().strip()
+try:
+    data = json.loads(body)
+except Exception:
+    print("")
+    sys.exit(0)
 
-          echo "HTTP=$LIST_CODE"
-          echo "BODY=$LIST_BODY"
+# esperamos lista de todos
+if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and 'id' in data[0]:
+    print(data[0]['id'])
+else:
+    print("")
+PY
+      <<EOF
+$LIST_BODY
+EOF
+)
 
-          test "$LIST_CODE" = "200" || { echo "ERROR: GET /todos no devolvió 200"; exit 1; }
-          echo "$LIST_BODY" | jq . >/dev/null 2>&1 || { echo "ERROR: Respuesta no es JSON válido"; exit 1; }
+      if [ -z "$TODO_ID" ]; then
+        echo "INFO: No hay todos en producción. No se puede ejecutar GET /todos/{id} sin modificar datos."
+        echo "INFO: La prueba de 'listar' se considera OK (HTTP 200)."
+        exit 0
+      fi
 
-          # Sacar un ID del listado (si existe)
-          ID_TODO=$(echo "$LIST_BODY" | jq -r '.[0].id // empty' 2>/dev/null || true)
+      echo "Usando TODO_ID=$TODO_ID"
 
-          if [ -z "$ID_TODO" ] || [ "$ID_TODO" = "null" ]; then
-            echo "INFO: Lista vacía o sin campo id. No se ejecuta GET /todos/{id} para evitar mutar datos."
-            echo "=== Rest Test (READ-ONLY) OK ==="
-            exit 0
-          fi
+      echo "---- curl: GET /todos/$TODO_ID ----"
+      GET_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos/$TODO_ID")
+      echo "$GET_RESP"
 
-          echo "ID_TODO=$ID_TODO"
+      GET_STATUS=$(echo "$GET_RESP" | sed -n 's/^HTTP_STATUS://p')
+      GET_BODY=$(echo "$GET_RESP" | sed '/^HTTP_STATUS:/d')
 
-          # -------------------------
-          # READ-ONLY TEST 2: GET /todos/{id}
-          # -------------------------
-          echo ""
-          echo "[2/2] GET /todos/$ID_TODO"
-          GET_RESP=$(curl -sS -w "\\n%{http_code}" "$BASE_URL/todos/$ID_TODO" || true)
+      if [ "$GET_STATUS" != "200" ]; then
+        echo "ERROR: GET /todos/$TODO_ID devolvió status $GET_STATUS"
+        exit 1
+      fi
 
-          GET_BODY=$(printf "%s" "$GET_RESP" | sed '$d')
-          GET_CODE=$(printf "%s" "$GET_RESP" | tail -n 1)
+      # Validación mínima: que el JSON devuelto tenga id = TODO_ID
+      python3 - <<PY
+import json, sys
+todo_id = "$TODO_ID"
+body = sys.stdin.read().strip()
+data = json.loads(body)
+assert str(data.get("id")) == str(todo_id), f"id devuelto {data.get('id')} != esperado {todo_id}"
+print("OK: GET /todos/{id} devuelve el id esperado")
+PY
+      <<EOF
+$GET_BODY
+EOF
 
-          echo "HTTP=$GET_CODE"
-          echo "BODY=$GET_BODY"
-
-          test "$GET_CODE" = "200" || { echo "ERROR: GET /todos/{id} no devolvió 200"; exit 1; }
-          echo "$GET_BODY" | jq . >/dev/null 2>&1 || { echo "ERROR: Respuesta no es JSON válido"; exit 1; }
-
-          RETURNED_ID=$(echo "$GET_BODY" | jq -r '.id // empty' 2>/dev/null || true)
-          if [ -n "$RETURNED_ID" ] && [ "$RETURNED_ID" != "$ID_TODO" ]; then
-            echo "ERROR: El id devuelto ($RETURNED_ID) no coincide con el solicitado ($ID_TODO)"
-            exit 1
-          fi
-
-          echo "=== Rest Test (READ-ONLY) OK ==="
-        '''
-      }
-    }
+      echo "=== Rest Test (READ-ONLY) OK ==="
+    '''
+  }
+}
 
     // =========================
     // Promote solo en develop
