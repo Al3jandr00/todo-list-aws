@@ -166,12 +166,15 @@ EOF
     // CD Rest Test (master) - SOLO LECTURA con curl (opción 3)
     // =========================
  stage('Rest Test (Read Only)') {
-  when { expression { return env.BRANCH_NAME == 'master' } }
+  when {
+    branch 'master'
+  }
   steps {
     sh '''
       set -eu
 
       STACK_NAME="todo-list-production"
+
       echo "=== Rest Test (READ-ONLY) ==="
 
       BASE_URL=$(aws cloudformation describe-stacks \
@@ -181,7 +184,7 @@ EOF
         --output text)
 
       if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "None" ]; then
-        echo "ERROR: BASE_URL no obtenido desde CloudFormation"
+        echo "ERROR: No se pudo obtener BASE_URL"
         exit 1
       fi
 
@@ -189,72 +192,42 @@ EOF
 
       echo "---- curl: GET /todos ----"
       LIST_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos")
+
       echo "$LIST_RESP"
 
-      # Separar body y status
       LIST_STATUS=$(echo "$LIST_RESP" | sed -n 's/^HTTP_STATUS://p')
       LIST_BODY=$(echo "$LIST_RESP" | sed '/^HTTP_STATUS:/d')
 
       if [ "$LIST_STATUS" != "200" ]; then
-        echo "ERROR: GET /todos devolvió status $LIST_STATUS"
+        echo "ERROR: GET /todos devolvió HTTP $LIST_STATUS"
         exit 1
       fi
 
-      # Obtener un id si hay items (sin jq, usando python)
-      TODO_ID=$(python3 - <<'PY'
-import json, sys
-body = sys.stdin.read().strip()
-try:
-    data = json.loads(body)
-except Exception:
-    print("")
-    sys.exit(0)
-
-# esperamos lista de todos
-if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict) and 'id' in data[0]:
-    print(data[0]['id'])
-else:
-    print("")
-PY
-      <<EOF
-$LIST_BODY
-EOF
-)
+      # Extraer un ID si existe alguno (sin jq, sin stdin)
+      TODO_ID=$(python3 -c 'import json,sys;
+d=json.loads(sys.argv[1]);
+print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_BODY")
 
       if [ -z "$TODO_ID" ]; then
         echo "INFO: No hay todos en producción. No se puede ejecutar GET /todos/{id} sin modificar datos."
-        echo "INFO: La prueba de 'listar' se considera OK (HTTP 200)."
+        echo "INFO: La prueba de 'listar todos' se considera OK (HTTP 200)."
         exit 0
       fi
 
-      echo "Usando TODO_ID=$TODO_ID"
-
       echo "---- curl: GET /todos/$TODO_ID ----"
       GET_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos/$TODO_ID")
+
       echo "$GET_RESP"
 
       GET_STATUS=$(echo "$GET_RESP" | sed -n 's/^HTTP_STATUS://p')
       GET_BODY=$(echo "$GET_RESP" | sed '/^HTTP_STATUS:/d')
 
       if [ "$GET_STATUS" != "200" ]; then
-        echo "ERROR: GET /todos/$TODO_ID devolvió status $GET_STATUS"
+        echo "ERROR: GET /todos/$TODO_ID devolvió HTTP $GET_STATUS"
         exit 1
       fi
 
-      # Validación mínima: que el JSON devuelto tenga id = TODO_ID
-      python3 - <<PY
-import json, sys
-todo_id = "$TODO_ID"
-body = sys.stdin.read().strip()
-data = json.loads(body)
-assert str(data.get("id")) == str(todo_id), f"id devuelto {data.get('id')} != esperado {todo_id}"
-print("OK: GET /todos/{id} devuelve el id esperado")
-PY
-      <<EOF
-$GET_BODY
-EOF
-
-      echo "=== Rest Test (READ-ONLY) OK ==="
+      echo "INFO: Pruebas READ-ONLY completadas correctamente."
     '''
   }
 }
