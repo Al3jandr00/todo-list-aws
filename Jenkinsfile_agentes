@@ -1,5 +1,5 @@
 pipeline {
-  agent none
+  agent any
 
   environment {
     AWS_DEFAULT_REGION = 'us-east-1'
@@ -14,49 +14,42 @@ pipeline {
 
   stages {
 
-    // =========================
-    // Checkout SIEMPRE en un agente (NO controller)
-    // =========================
+    // -------------------------
+    // 1) Get Code (agente por defecto)
+    // -------------------------
     stage('Get Code') {
-      agent { label 'agent-static' }
       steps {
         checkout scm
         sh '''
           set -e
-          echo "=== WHERE AM I? (Get Code) ==="
-          whoami
-          hostname
           echo "BRANCH_NAME=$BRANCH_NAME"
           git log -1 --oneline
         '''
-        stash name: 'src', includes: '**/*'
+        // Guardamos el workspace para reusarlo en los agentes
+        stash name: 'repo', includes: '**', excludes: '.git/**'
       }
     }
 
-    // =========================
-    // CI (develop) - Static Test en agent-static
-    // =========================
+    // -------------------------
+    // 2) Static Test (agent-static)
+    // -------------------------
     stage('Static Test') {
       when { branch 'develop' }
       agent { label 'agent-static' }
       steps {
-        unstash 'src'
+        unstash 'repo'
         sh '''
           set -e
-          echo "=== WHERE AM I? (Static Test) ==="
-          whoami
-          hostname
-
           python3 -m pip install --user --upgrade pip >/dev/null
           python3 -m pip install --user flake8 bandit >/dev/null
 
           mkdir -p reports
 
-          # Flake8 solo /src -> informe (NO falla el stage si hay issues)
+          # Flake8 -> informe (no rompe build si hay issues)
           python3 -m flake8 src --statistics --count --tee --output-file reports/flake8.txt || true
           test -s reports/flake8.txt || echo "No flake8 issues" > reports/flake8.txt
 
-          # Bandit solo /src -> informe (NO falla el stage si hay issues)
+          # Bandit -> informe (no rompe build si hay issues)
           python3 -m bandit -r src -f txt -o reports/bandit.txt || true
           test -s reports/bandit.txt || echo "No bandit issues" > reports/bandit.txt
 
@@ -73,20 +66,15 @@ pipeline {
       }
     }
 
-    // =========================
-    // Deploy (develop/master) en agent-rest
-    // =========================
+    // -------------------------
+    // 3) Deploy (agente por defecto)
+    // -------------------------
     stage('Deploy') {
-      agent { label 'agent-rest' }
       steps {
-        unstash 'src'
+        unstash 'repo'
         sh '''
           set -eu
-          echo "=== WHERE AM I? (Deploy) ==="
-          whoami
-          hostname
 
-          # Elegir entorno por rama
           if [ "$BRANCH_NAME" = "develop" ]; then
             STACK_NAME="todo-list-staging"
             STAGE_PARAM="staging"
@@ -103,12 +91,10 @@ pipeline {
           sam build
           sam validate
 
-          # Config mínimo para CI (evitar modo guiado)
           cat > samconfig-ci.toml <<EOF
 version = 0.1
 EOF
 
-          # Evitar AlreadyExistsException por changeset samcli-deploy repetido
           echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
           CHANGESETS=$(aws cloudformation list-change-sets \
             --stack-name "$STACK_NAME" \
@@ -149,23 +135,19 @@ EOF
       }
     }
 
-    // =========================
-    // CI Rest Test (develop) - Pytest completo
-    // =========================
+    // -------------------------
+    // 4) Rest Test (develop) (agent-rest)
+    // -------------------------
     stage('Rest Test') {
       when { branch 'develop' }
       agent { label 'agent-rest' }
       steps {
-        unstash 'src'
+        unstash 'repo'
         sh '''
           set -e
-          echo "=== WHERE AM I? (Rest Test) ==="
-          whoami
-          hostname
-
           STACK_NAME="todo-list-staging"
 
-          # Obtener la URL del API desde CloudFormation
+          # El agente REST no "hereda" la URL del deploy -> la volvemos a leer de CloudFormation
           BASE_URL=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --region us-east-1 \
@@ -176,28 +158,23 @@ EOF
           export BASE_URL
 
           python3 -m pip install --user -U pytest requests >/dev/null
-
-          # Ejecutar pruebas de integración (si falla una, falla el pipeline)
           pytest -q test/integration/todoApiTest.py -m api
         '''
       }
     }
 
-    // =========================
-    // CD Rest Test (master) - SOLO LECTURA con curl
-    // =========================
+    // -------------------------
+    // 5) Rest Test (Read Only) (master) (agent-rest)
+    // -------------------------
     stage('Rest Test (Read Only)') {
       when { branch 'master' }
       agent { label 'agent-rest' }
       steps {
-        unstash 'src'
+        unstash 'repo'
         sh '''
           set -eu
-          echo "=== WHERE AM I? (Read Only) ==="
-          whoami
-          hostname
-
           STACK_NAME="todo-list-production"
+
           echo "=== Rest Test (READ-ONLY) ==="
 
           BASE_URL=$(aws cloudformation describe-stacks \
@@ -215,6 +192,7 @@ EOF
 
           echo "---- curl: GET /todos ----"
           LIST_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos")
+
           echo "$LIST_RESP"
 
           LIST_STATUS=$(echo "$LIST_RESP" | sed -n 's/^HTTP_STATUS://p')
@@ -230,7 +208,7 @@ d=json.loads(sys.argv[1]);
 print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_BODY")
 
           if [ -z "$TODO_ID" ]; then
-            echo "INFO: No hay todos en producción. Listado OK (HTTP 200)."
+            echo "INFO: No hay todos en producción. Prueba OK (listar = 200)."
             exit 0
           fi
 
@@ -249,14 +227,13 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
       }
     }
 
-    // =========================
-    // Promote solo en develop (merge develop -> master)
-    // =========================
+    // -------------------------
+    // 6) Promote (agente por defecto)
+    // -------------------------
     stage('Promote') {
       when { branch 'develop' }
-      agent { label 'agent-rest' } // o agent-static, pero que sea un AGENTE, no controller
       steps {
-        unstash 'src'
+        unstash 'repo'
         withCredentials([
           usernamePassword(
             credentialsId: 'github-pat',
@@ -266,30 +243,18 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
         ]) {
           sh '''
             set -e
-            echo "=== WHERE AM I? (Promote) ==="
-            whoami
-            hostname
-
             echo "=== Promote: merge develop -> master ==="
 
             git config user.email "jenkins@local"
             git config user.name "jenkins"
 
-            # Asegurar refs
             git fetch origin --prune
-
-            # Traer origin/master explícitamente
             git fetch origin master:refs/remotes/origin/master
 
-            # Dejar master igual al remoto
             git checkout -B master refs/remotes/origin/master
-
-            # Merge desde develop (remota)
             git merge --no-ff origin/develop -m "Promote: merge develop into master"
 
-            # Push a master
             git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
-
             echo "=== Promote completed successfully ==="
           '''
         }
@@ -297,3 +262,4 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
     }
   }
 }
+
