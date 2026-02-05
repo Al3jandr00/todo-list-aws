@@ -1,0 +1,275 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_DEFAULT_REGION = 'us-east-1'
+    AWS_REGION         = 'us-east-1'
+    SAM_CLI_TELEMETRY  = '0'
+  }
+
+  options {
+    timestamps()
+    skipDefaultCheckout(true)
+  }
+
+  stages {
+
+    stage('Get Code') {
+      steps {
+        checkout scm
+        sh '''
+          set -e
+          echo "=== WHERE AM I? ==="
+          whoami
+          hostname
+          echo "BRANCH_NAME=$BRANCH_NAME"
+          git log -1 --oneline
+        '''
+        // Para que otros agentes tengan el código
+        stash name: 'src', includes: '**/*'
+      }
+    }
+
+    // =========================
+    // CI (develop) - Static Test en agent-static
+    // =========================
+    stage('Static Test') {
+      when { branch 'develop' }
+      agent { label 'agent-static' }
+      steps {
+        unstash 'src'
+        sh '''
+          set -e
+          echo "=== WHERE AM I? ==="
+          whoami
+          hostname
+
+          python3 -m pip install --user --upgrade pip >/dev/null
+          python3 -m pip install --user flake8 bandit >/dev/null
+
+          mkdir -p reports
+
+          python3 -m flake8 src --statistics --count --tee --output-file reports/flake8.txt || true
+          test -s reports/flake8.txt || echo "No flake8 issues" > reports/flake8.txt
+
+          python3 -m bandit -r src -f txt -o reports/bandit.txt || true
+          test -s reports/bandit.txt || echo "No bandit issues" > reports/bandit.txt
+
+          echo "== Flake8 report (tail) =="
+          tail -n 50 reports/flake8.txt || true
+          echo "== Bandit report (tail) =="
+          tail -n 50 reports/bandit.txt || true
+        '''
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'reports/*.txt', fingerprint: true
+        }
+      }
+    }
+
+    // =========================
+    // Deploy (default agent)
+    // =========================
+    stage('Deploy') {
+      steps {
+        unstash 'src'
+        sh '''
+          set -eu
+          echo "=== WHERE AM I? ==="
+          whoami
+          hostname
+
+          if [ "$BRANCH_NAME" = "develop" ]; then
+            STACK_NAME="todo-list-staging"
+            STAGE_PARAM="staging"
+          elif [ "$BRANCH_NAME" = "master" ]; then
+            STACK_NAME="todo-list-production"
+            STAGE_PARAM="production"
+          else
+            echo "INFO: Rama $BRANCH_NAME sin despliegue (solo develop/master)."
+            exit 0
+          fi
+
+          echo "=== Deploy stack: $STACK_NAME (Stage=$STAGE_PARAM) ==="
+
+          sam build
+          sam validate
+
+          cat > samconfig-ci.toml <<EOF
+version = 0.1
+EOF
+
+          echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
+          CHANGESETS=$(aws cloudformation list-change-sets \
+            --stack-name "$STACK_NAME" \
+            --region us-east-1 \
+            --query "Summaries[?starts_with(ChangeSetName, 'samcli-deploy')].[ChangeSetName,Status]" \
+            --output text 2>/dev/null || true)
+
+          if [ -n "$CHANGESETS" ]; then
+            echo "$CHANGESETS" | while read -r CS_NAME CS_STATUS; do
+              case "$CS_STATUS" in
+                CREATE_IN_PROGRESS|DELETE_IN_PROGRESS)
+                  echo " - Skip (in progress): $CS_NAME ($CS_STATUS)"
+                  ;;
+                *)
+                  echo " - Deleting: $CS_NAME ($CS_STATUS)"
+                  aws cloudformation delete-change-set \
+                    --stack-name "$STACK_NAME" \
+                    --change-set-name "$CS_NAME" \
+                    --region us-east-1 || true
+                  ;;
+              esac
+            done
+          else
+            echo " - No samcli-deploy changesets found."
+          fi
+
+          sleep 2
+
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --resolve-s3 \
+            --capabilities CAPABILITY_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --config-file samconfig-ci.toml \
+            --parameter-overrides Stage="$STAGE_PARAM"
+        '''
+      }
+    }
+
+    // =========================
+    // Rest Test (develop) en agent-rest
+    // =========================
+    stage('Rest Test') {
+      when { branch 'develop' }
+      agent { label 'agent-rest' }
+      steps {
+        unstash 'src'
+        sh '''
+          set -e
+          echo "=== WHERE AM I? ==="
+          whoami
+          hostname
+
+          STACK_NAME="todo-list-staging"
+
+          BASE_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region us-east-1 \
+            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+            --output text)
+
+          echo "BASE_URL=$BASE_URL"
+          export BASE_URL
+
+          python3 -m pip install --user -U pytest requests >/dev/null
+          pytest -q test/integration/todoApiTest.py -m api
+        '''
+      }
+    }
+
+    // =========================
+    // Rest Test (Read Only) (master) en agent-rest
+    // =========================
+    stage('Rest Test (Read Only)') {
+      when { branch 'master' }
+      agent { label 'agent-rest' }
+      steps {
+        unstash 'src'
+        sh '''
+          set -eu
+          echo "=== WHERE AM I? ==="
+          whoami
+          hostname
+
+          STACK_NAME="todo-list-production"
+          echo "=== Rest Test (READ-ONLY) ==="
+
+          BASE_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --region us-east-1 \
+            --query "Stacks[0].Outputs[?OutputKey=='BaseUrlApi'].OutputValue" \
+            --output text)
+
+          if [ -z "$BASE_URL" ] || [ "$BASE_URL" = "None" ]; then
+            echo "ERROR: No se pudo obtener BASE_URL"
+            exit 1
+          fi
+
+          echo "BASE_URL=$BASE_URL"
+
+          echo "---- curl: GET /todos ----"
+          LIST_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos")
+          echo "$LIST_RESP"
+
+          LIST_STATUS=$(echo "$LIST_RESP" | sed -n 's/^HTTP_STATUS://p')
+          LIST_BODY=$(echo "$LIST_RESP" | sed '/^HTTP_STATUS:/d')
+
+          if [ "$LIST_STATUS" != "200" ]; then
+            echo "ERROR: GET /todos devolvió HTTP $LIST_STATUS"
+            exit 1
+          fi
+
+          TODO_ID=$(python3 -c 'import json,sys;
+d=json.loads(sys.argv[1]);
+print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_BODY")
+
+          if [ -z "$TODO_ID" ]; then
+            echo "INFO: No hay todos en producción. Listado OK (HTTP 200)."
+            exit 0
+          fi
+
+          echo "---- curl: GET /todos/$TODO_ID ----"
+          GET_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos/$TODO_ID")
+          echo "$GET_RESP"
+
+          GET_STATUS=$(echo "$GET_RESP" | sed -n 's/^HTTP_STATUS://p')
+          if [ "$GET_STATUS" != "200" ]; then
+            echo "ERROR: GET /todos/$TODO_ID devolvió HTTP $GET_STATUS"
+            exit 1
+          fi
+
+          echo "INFO: Pruebas READ-ONLY completadas correctamente."
+        '''
+      }
+    }
+
+    // =========================
+    // Promote (solo develop) - default agent
+    // =========================
+    stage('Promote') {
+      when { branch 'develop' }
+      steps {
+        unstash 'src'
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'github-pat',
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GIT_TOKEN'
+          )
+        ]) {
+          sh '''
+            set -e
+            echo "=== WHERE AM I? ==="
+            whoami
+            hostname
+
+            echo "=== Promote: merge develop -> master ==="
+
+            git config user.email "jenkins@local"
+            git config user.name "jenkins"
+
+            git fetch origin --prune
+            git fetch origin master:refs/remotes/origin/master
+            git checkout -B master refs/remotes/origin/master
+            git merge --no-ff origin/develop -m "Promote: merge develop into master"
+            git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
+          '''
+        }
+      }
+    }
+  }
+}
