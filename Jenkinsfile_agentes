@@ -1,5 +1,5 @@
 pipeline {
-  agent any
+  agent none
 
   environment {
     AWS_DEFAULT_REGION = 'us-east-1'
@@ -14,18 +14,21 @@ pipeline {
 
   stages {
 
+    // =========================
+    // Checkout SIEMPRE en un agente (NO controller)
+    // =========================
     stage('Get Code') {
+      agent { label 'agent-static' }
       steps {
         checkout scm
         sh '''
           set -e
-          echo "=== WHERE AM I? ==="
+          echo "=== WHERE AM I? (Get Code) ==="
           whoami
           hostname
           echo "BRANCH_NAME=$BRANCH_NAME"
           git log -1 --oneline
         '''
-        // Para que otros agentes tengan el código
         stash name: 'src', includes: '**/*'
       }
     }
@@ -40,7 +43,7 @@ pipeline {
         unstash 'src'
         sh '''
           set -e
-          echo "=== WHERE AM I? ==="
+          echo "=== WHERE AM I? (Static Test) ==="
           whoami
           hostname
 
@@ -49,9 +52,11 @@ pipeline {
 
           mkdir -p reports
 
+          # Flake8 solo /src -> informe (NO falla el stage si hay issues)
           python3 -m flake8 src --statistics --count --tee --output-file reports/flake8.txt || true
           test -s reports/flake8.txt || echo "No flake8 issues" > reports/flake8.txt
 
+          # Bandit solo /src -> informe (NO falla el stage si hay issues)
           python3 -m bandit -r src -f txt -o reports/bandit.txt || true
           test -s reports/bandit.txt || echo "No bandit issues" > reports/bandit.txt
 
@@ -69,17 +74,19 @@ pipeline {
     }
 
     // =========================
-    // Deploy (default agent)
+    // Deploy (develop/master) en agent-rest
     // =========================
     stage('Deploy') {
+      agent { label 'agent-rest' }
       steps {
         unstash 'src'
         sh '''
           set -eu
-          echo "=== WHERE AM I? ==="
+          echo "=== WHERE AM I? (Deploy) ==="
           whoami
           hostname
 
+          # Elegir entorno por rama
           if [ "$BRANCH_NAME" = "develop" ]; then
             STACK_NAME="todo-list-staging"
             STAGE_PARAM="staging"
@@ -96,10 +103,12 @@ pipeline {
           sam build
           sam validate
 
+          # Config mínimo para CI (evitar modo guiado)
           cat > samconfig-ci.toml <<EOF
 version = 0.1
 EOF
 
+          # Evitar AlreadyExistsException por changeset samcli-deploy repetido
           echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
           CHANGESETS=$(aws cloudformation list-change-sets \
             --stack-name "$STACK_NAME" \
@@ -141,7 +150,7 @@ EOF
     }
 
     // =========================
-    // Rest Test (develop) en agent-rest
+    // CI Rest Test (develop) - Pytest completo
     // =========================
     stage('Rest Test') {
       when { branch 'develop' }
@@ -150,12 +159,13 @@ EOF
         unstash 'src'
         sh '''
           set -e
-          echo "=== WHERE AM I? ==="
+          echo "=== WHERE AM I? (Rest Test) ==="
           whoami
           hostname
 
           STACK_NAME="todo-list-staging"
 
+          # Obtener la URL del API desde CloudFormation
           BASE_URL=$(aws cloudformation describe-stacks \
             --stack-name "$STACK_NAME" \
             --region us-east-1 \
@@ -166,13 +176,15 @@ EOF
           export BASE_URL
 
           python3 -m pip install --user -U pytest requests >/dev/null
+
+          # Ejecutar pruebas de integración (si falla una, falla el pipeline)
           pytest -q test/integration/todoApiTest.py -m api
         '''
       }
     }
 
     // =========================
-    // Rest Test (Read Only) (master) en agent-rest
+    // CD Rest Test (master) - SOLO LECTURA con curl
     // =========================
     stage('Rest Test (Read Only)') {
       when { branch 'master' }
@@ -181,7 +193,7 @@ EOF
         unstash 'src'
         sh '''
           set -eu
-          echo "=== WHERE AM I? ==="
+          echo "=== WHERE AM I? (Read Only) ==="
           whoami
           hostname
 
@@ -238,10 +250,11 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
     }
 
     // =========================
-    // Promote (solo develop) - default agent
+    // Promote solo en develop (merge develop -> master)
     // =========================
     stage('Promote') {
       when { branch 'develop' }
+      agent { label 'agent-rest' } // o agent-static, pero que sea un AGENTE, no controller
       steps {
         unstash 'src'
         withCredentials([
@@ -253,7 +266,7 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
         ]) {
           sh '''
             set -e
-            echo "=== WHERE AM I? ==="
+            echo "=== WHERE AM I? (Promote) ==="
             whoami
             hostname
 
@@ -262,11 +275,22 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
             git config user.email "jenkins@local"
             git config user.name "jenkins"
 
+            # Asegurar refs
             git fetch origin --prune
+
+            # Traer origin/master explícitamente
             git fetch origin master:refs/remotes/origin/master
+
+            # Dejar master igual al remoto
             git checkout -B master refs/remotes/origin/master
+
+            # Merge desde develop (remota)
             git merge --no-ff origin/develop -m "Promote: merge develop into master"
+
+            # Push a master
             git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
+
+            echo "=== Promote completed successfully ==="
           '''
         }
       }
