@@ -22,6 +22,13 @@ pipeline {
         checkout scm
         sh '''
           set -e
+          echo "=== STAGE: Get Code ==="
+          echo "=== RUNNING ON ==="
+          whoami
+          hostname
+          pwd
+          echo "=================="
+
           echo "BRANCH_NAME=$BRANCH_NAME"
           git log -1 --oneline
         '''
@@ -31,7 +38,7 @@ pipeline {
     }
 
     // -------------------------
-    // 2) Static Test (agent-static)
+    // 2) Static Test (agent-static) - solo CI (develop)
     // -------------------------
     stage('Static Test') {
       when { branch 'develop' }
@@ -40,6 +47,13 @@ pipeline {
         unstash 'repo'
         sh '''
           set -e
+          echo "=== STAGE: Static Test ==="
+          echo "=== RUNNING ON ==="
+          whoami
+          hostname
+          pwd
+          echo "=================="
+
           python3 -m pip install --user --upgrade pip >/dev/null
           python3 -m pip install --user flake8 bandit >/dev/null
 
@@ -74,7 +88,14 @@ pipeline {
         unstash 'repo'
         sh '''
           set -eu
+          echo "=== STAGE: Deploy ==="
+          echo "=== RUNNING ON ==="
+          whoami
+          hostname
+          pwd
+          echo "=================="
 
+          # Elegir entorno por rama
           if [ "$BRANCH_NAME" = "develop" ]; then
             STACK_NAME="todo-list-staging"
             STAGE_PARAM="staging"
@@ -91,10 +112,12 @@ pipeline {
           sam build
           sam validate
 
+          # Config mínimo para CI (evitar modo guiado)
           cat > samconfig-ci.toml <<EOF
 version = 0.1
 EOF
 
+          # --- FIX: evitar AlreadyExistsException por changeset samcli-deploy repetido ---
           echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
           CHANGESETS=$(aws cloudformation list-change-sets \
             --stack-name "$STACK_NAME" \
@@ -121,7 +144,9 @@ EOF
             echo " - No samcli-deploy changesets found."
           fi
 
+          # pequeño delay por si hay builds muy seguidos
           sleep 2
+          # ---------------------------------------------------------------------------
 
           sam deploy \
             --stack-name "$STACK_NAME" \
@@ -136,7 +161,7 @@ EOF
     }
 
     // -------------------------
-    // 4) Rest Test (develop) (agent-rest)
+    // 4) Rest Test (develop) (agent-rest) - Pytest completo (5 pruebas)
     // -------------------------
     stage('Rest Test') {
       when { branch 'develop' }
@@ -145,6 +170,13 @@ EOF
         unstash 'repo'
         sh '''
           set -e
+          echo "=== STAGE: Rest Test (develop) ==="
+          echo "=== RUNNING ON ==="
+          whoami
+          hostname
+          pwd
+          echo "=================="
+
           STACK_NAME="todo-list-staging"
 
           # El agente REST no "hereda" la URL del deploy -> la volvemos a leer de CloudFormation
@@ -164,7 +196,7 @@ EOF
     }
 
     // -------------------------
-    // 5) Rest Test (Read Only) (master) (agent-rest)
+    // 5) Rest Test (Read Only) (master) (agent-rest) - curl read-only
     // -------------------------
     stage('Rest Test (Read Only)') {
       when { branch 'master' }
@@ -173,6 +205,13 @@ EOF
         unstash 'repo'
         sh '''
           set -eu
+          echo "=== STAGE: Rest Test (Read Only) (master) ==="
+          echo "=== RUNNING ON ==="
+          whoami
+          hostname
+          pwd
+          echo "=================="
+
           STACK_NAME="todo-list-production"
 
           echo "=== Rest Test (READ-ONLY) ==="
@@ -203,6 +242,7 @@ EOF
             exit 1
           fi
 
+          # Extraer un ID si existe alguno (sin jq)
           TODO_ID=$(python3 -c 'import json,sys;
 d=json.loads(sys.argv[1]);
 print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_BODY")
@@ -228,7 +268,7 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
     }
 
     // -------------------------
-    // 6) Promote (agente por defecto)
+    // 6) Promote (agente por defecto) - solo en develop
     // -------------------------
     stage('Promote') {
       when { branch 'develop' }
@@ -243,18 +283,29 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
         ]) {
           sh '''
             set -e
+            echo "=== STAGE: Promote ==="
+            echo "=== RUNNING ON ==="
+            whoami
+            hostname
+            pwd
+            echo "=================="
+
             echo "=== Promote: merge develop -> master ==="
 
             git config user.email "jenkins@local"
             git config user.name "jenkins"
 
+            # Asegurar refs
             git fetch origin --prune
             git fetch origin master:refs/remotes/origin/master
 
+            # Dejar master igual al remoto y mergear develop
             git checkout -B master refs/remotes/origin/master
             git merge --no-ff origin/develop -m "Promote: merge develop into master"
 
+            # Push a master
             git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
+
             echo "=== Promote completed successfully ==="
           '''
         }
@@ -262,4 +313,3 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
     }
   }
 }
-
