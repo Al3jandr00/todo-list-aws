@@ -24,6 +24,8 @@ pipeline {
           set -e
           echo "=== STAGE: Get Code ==="
           echo "=== RUNNING ON ==="
+          echo "NODE_NAME=$NODE_NAME"
+          echo "EXECUTOR_NUMBER=$EXECUTOR_NUMBER"
           whoami
           hostname
           pwd
@@ -38,7 +40,7 @@ pipeline {
     }
 
     // -------------------------
-    // 2) Static Test (agent-static) - solo CI (develop)
+    // 2) Static Test (agent-static)
     // -------------------------
     stage('Static Test') {
       when { branch 'develop' }
@@ -49,6 +51,8 @@ pipeline {
           set -e
           echo "=== STAGE: Static Test ==="
           echo "=== RUNNING ON ==="
+          echo "NODE_NAME=$NODE_NAME"
+          echo "EXECUTOR_NUMBER=$EXECUTOR_NUMBER"
           whoami
           hostname
           pwd
@@ -90,6 +94,8 @@ pipeline {
           set -eu
           echo "=== STAGE: Deploy ==="
           echo "=== RUNNING ON ==="
+          echo "NODE_NAME=$NODE_NAME"
+          echo "EXECUTOR_NUMBER=$EXECUTOR_NUMBER"
           whoami
           hostname
           pwd
@@ -161,7 +167,7 @@ EOF
     }
 
     // -------------------------
-    // 4) Rest Test (develop) (agent-rest) - Pytest completo (5 pruebas)
+    // 4) Rest Test (develop) (agent-rest)
     // -------------------------
     stage('Rest Test') {
       when { branch 'develop' }
@@ -172,6 +178,8 @@ EOF
           set -e
           echo "=== STAGE: Rest Test (develop) ==="
           echo "=== RUNNING ON ==="
+          echo "NODE_NAME=$NODE_NAME"
+          echo "EXECUTOR_NUMBER=$EXECUTOR_NUMBER"
           whoami
           hostname
           pwd
@@ -196,7 +204,7 @@ EOF
     }
 
     // -------------------------
-    // 5) Rest Test (Read Only) (master) (agent-rest) - curl read-only
+    // 5) Rest Test (Read Only) (master) (agent-rest)
     // -------------------------
     stage('Rest Test (Read Only)') {
       when { branch 'master' }
@@ -207,6 +215,8 @@ EOF
           set -eu
           echo "=== STAGE: Rest Test (Read Only) (master) ==="
           echo "=== RUNNING ON ==="
+          echo "NODE_NAME=$NODE_NAME"
+          echo "EXECUTOR_NUMBER=$EXECUTOR_NUMBER"
           whoami
           hostname
           pwd
@@ -242,7 +252,7 @@ EOF
             exit 1
           fi
 
-          # Extraer un ID si existe alguno (sin jq)
+          # Extraer un ID si existe alguno (sin jq, sin stdin)
           TODO_ID=$(python3 -c 'import json,sys;
 d=json.loads(sys.argv[1]);
 print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_BODY")
@@ -254,9 +264,11 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
 
           echo "---- curl: GET /todos/$TODO_ID ----"
           GET_RESP=$(curl -sS -w "\\nHTTP_STATUS:%{http_code}\\n" "$BASE_URL/todos/$TODO_ID")
+
           echo "$GET_RESP"
 
           GET_STATUS=$(echo "$GET_RESP" | sed -n 's/^HTTP_STATUS://p')
+
           if [ "$GET_STATUS" != "200" ]; then
             echo "ERROR: GET /todos/$TODO_ID devolvió HTTP $GET_STATUS"
             exit 1
@@ -268,7 +280,7 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
     }
 
     // -------------------------
-    // 6) Promote (agente por defecto) - solo en develop
+    // 6) Promote (agente por defecto)
     // -------------------------
     stage('Promote') {
       when { branch 'develop' }
@@ -285,6 +297,8 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
             set -e
             echo "=== STAGE: Promote ==="
             echo "=== RUNNING ON ==="
+            echo "NODE_NAME=$NODE_NAME"
+            echo "EXECUTOR_NUMBER=$EXECUTOR_NUMBER"
             whoami
             hostname
             pwd
@@ -295,15 +309,12 @@ print(d[0]["id"] if isinstance(d,list) and d and "id" in d[0] else "")' "$LIST_B
             git config user.email "jenkins@local"
             git config user.name "jenkins"
 
-            # Asegurar refs
             git fetch origin --prune
             git fetch origin master:refs/remotes/origin/master
 
-            # Dejar master igual al remoto y mergear develop
             git checkout -B master refs/remotes/origin/master
             git merge --no-ff origin/develop -m "Promote: merge develop into master"
 
-            # Push a master
             git push https://$GIT_USER:$GIT_TOKEN@github.com/Al3jandr00/todo-list-aws.git master
 
             echo "=== Promote completed successfully ==="
