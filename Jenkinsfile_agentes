@@ -16,6 +16,7 @@ pipeline {
 
     // -------------------------
     // 1) Get Code (agente por defecto)
+    //    + Reto 4: descarga samconfig.toml desde repo config (rama staging/production)
     // -------------------------
     stage('Get Code') {
       steps {
@@ -33,6 +34,34 @@ pipeline {
 
           echo "BRANCH_NAME=$BRANCH_NAME"
           git log -1 --oneline
+
+          # -------------------------
+          # Reto 4: Config externa
+          # - develop  -> rama staging
+          # - master   -> rama production
+          # -------------------------
+          if [ "$BRANCH_NAME" = "develop" ]; then
+            CONFIG_BRANCH="staging"
+          elif [ "$BRANCH_NAME" = "master" ]; then
+            CONFIG_BRANCH="production"
+          else
+            CONFIG_BRANCH=""
+          fi
+
+          if [ -n "$CONFIG_BRANCH" ]; then
+            echo "Downloading samconfig.toml from todo-list-aws-config ($CONFIG_BRANCH)..."
+
+            curl -sSLo samconfig.toml \
+              "https://raw.githubusercontent.com/Al3jandr00/todo-list-aws-config/${CONFIG_BRANCH}/samconfig.toml"
+
+            echo "Downloaded samconfig.toml:"
+            ls -l samconfig.toml
+            echo "---- samconfig.toml (head) ----"
+            head -n 80 samconfig.toml || true
+            echo "-------------------------------"
+          else
+            echo "INFO: Rama $BRANCH_NAME sin config externa (solo develop/master)."
+          fi
         '''
         // Guardamos el workspace para reusarlo en los agentes
         stash name: 'repo', includes: '**', excludes: '.git/**'
@@ -86,6 +115,7 @@ pipeline {
 
     // -------------------------
     // 3) Deploy (agente por defecto)
+    //    + Reto 4: usar samconfig.toml descargado (repo externo)
     // -------------------------
     stage('Deploy') {
       steps {
@@ -104,24 +134,25 @@ pipeline {
           # Elegir entorno por rama
           if [ "$BRANCH_NAME" = "develop" ]; then
             STACK_NAME="todo-list-staging"
-            STAGE_PARAM="staging"
           elif [ "$BRANCH_NAME" = "master" ]; then
             STACK_NAME="todo-list-production"
-            STAGE_PARAM="production"
           else
             echo "INFO: Rama $BRANCH_NAME sin despliegue (solo develop/master)."
             exit 0
           fi
 
-          echo "=== Deploy stack: $STACK_NAME (Stage=$STAGE_PARAM) ==="
+          # Reto 4: requerimos samconfig.toml en develop/master
+          if [ ! -f samconfig.toml ]; then
+            echo "ERROR: samconfig.toml no existe en el workspace. Revisa la descarga en 'Get Code'."
+            exit 1
+          fi
+
+          echo "=== Deploy stack: $STACK_NAME (usando samconfig.toml) ==="
+          echo "samconfig.toml (head):"
+          head -n 40 samconfig.toml || true
 
           sam build
           sam validate
-
-          # Config mínimo para CI (evitar modo guiado)
-          cat > samconfig-ci.toml <<EOF
-version = 0.1
-EOF
 
           # --- FIX: evitar AlreadyExistsException por changeset samcli-deploy repetido ---
           echo "Cleaning old CloudFormation changesets for $STACK_NAME..."
@@ -154,14 +185,11 @@ EOF
           sleep 2
           # ---------------------------------------------------------------------------
 
+          # Reto 4: deploy con config externa
           sam deploy \
-            --stack-name "$STACK_NAME" \
-            --resolve-s3 \
-            --capabilities CAPABILITY_IAM \
+            --config-file samconfig.toml \
             --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --config-file samconfig-ci.toml \
-            --parameter-overrides Stage="$STAGE_PARAM"
+            --no-fail-on-empty-changeset
         '''
       }
     }
